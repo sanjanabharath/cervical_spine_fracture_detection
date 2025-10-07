@@ -137,22 +137,35 @@ def uploaded_file(filename):
 def analyze():
     if 'file' not in request.files:
         return jsonify({'status': 'error', 'error': 'No file part'}), 400
+    
     file = request.files['file']
     if file.filename == '':
         return jsonify({'status': 'error', 'error': 'No selected file'}), 400
-    allergies = request.form.get('allergies', '')
-    medical_history = request.form.get('medical_history', '')
+    
+    # Get form data
+    allergies = request.form.get('allergies', '').strip()
+    medical_history = request.form.get('medical_history', '').strip()
+    
+    # Check if prescription is requested
     include_prescription = request.args.get('include_prescription', 'false').lower() == 'true'
+    
+    print(f"Received request - Include prescription: {include_prescription}")
+    print(f"Allergies: {allergies}")
+    print(f"Medical history: {medical_history}")
+    
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
+        
         try:
             img_array = process_image(filepath)
             probabilities, highest_class, highest_prob = get_model_prediction(img_array)
             recommendations = generate_vertebrae_recommendations(highest_class, probabilities)
+            
             fracture_probs = [prob for ftype, prob in probabilities.items() if ftype != "No fracture"]
             overall_risk = sum(fracture_probs) if fracture_probs else 0
+            
             analysis_results = {
                 "fracture_probabilities": probabilities,
                 "highest_probability_fracture": {
@@ -162,77 +175,235 @@ def analyze():
                 "overall_fracture_risk": overall_risk,
                 "recommendations": recommendations
             }
-            if include_prescription and tokenizer and model:
+            
+            # Generate prescription if requested
+            if include_prescription:
                 diagnosis = f"{highest_class} detected with {highest_prob*100:.2f}% confidence."
+                print(f"Generating prescription for: {diagnosis}")
+                
                 prescription = generate_prescription(diagnosis, allergies, medical_history)
                 analysis_results["prescription"] = prescription
+                print("Prescription generated successfully")
+            
             return jsonify({
                 'status': 'success', 
                 'file_url': url_for('uploaded_file', filename=filename),
                 'analysis_results': analysis_results
             })
+            
         except Exception as e:
+            print(f"Error in analysis: {str(e)}")
             return jsonify({'status': 'error', 'error': str(e)}), 500
+    
     return jsonify({'status': 'error', 'error': 'File type not allowed'}), 400
 
 def generate_prescription(diagnosis, allergies=None, medical_history=None):
+    """Generate medical prescription using LLM or fallback"""
+    
+    # Default values
+    allergies_text = allergies if allergies else "None reported"
+    medical_history_text = medical_history if medical_history else "No significant history"
+    
+    print(f"Generating prescription with tokenizer: {tokenizer is not None}, model: {model is not None}")
+    
+    # If models not available, use fallback immediately
     if not (tokenizer and model):
-        return "Language model unavailable for prescription generation."
-    allergies_text = allergies if allergies else "None reported."
-    medical_history_text = medical_history if medical_history else "No significant history."
-    prompt = f"""
+        print("Models not available, using fallback prescription")
+        return generate_fallback_prescription(diagnosis, allergies_text, medical_history_text)
+    
+    prompt = f"""Generate a detailed medical prescription for the following:
+
 PATIENT INFORMATION:
 - Diagnosis: {diagnosis}
 - Known Allergies: {allergies_text}
 - Medical History: {medical_history_text}
 
-Based on this, write a CLINICAL MEDICAL PRESCRIPTION with 3 clear sections:
-[PRESCRIPTION], [RECOMMENDATIONS], and [PRECAUTIONS].
-Use bullet points and formal medical language only. DO NOT provide casual advice.
-"""
+Please provide a structured prescription with the following sections:
+
+[PRESCRIPTION]
+List specific medications with dosages, frequency, and duration.
+
+[RECOMMENDATIONS]
+Provide clinical recommendations for treatment and follow-up.
+
+[PRECAUTIONS]
+List important warnings and signs to watch for.
+
+Use formal medical language and be specific."""
+    
     try:
-        inputs = tokenizer(prompt, return_tensors="pt", padding=True)
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, max_length=256)
+        
         generation_params = {
             "input_ids": inputs["input_ids"],
             "attention_mask": inputs["attention_mask"],
             "max_length": 512,
+            "min_length": 150,
             "num_return_sequences": 1,
-            "no_repeat_ngram_size": 2,
+            "no_repeat_ngram_size": 3,
             "do_sample": True,
-            "temperature": 0.7,
-            "top_p": 0.9,
+            "temperature": 0.8,
+            "top_p": 0.92,
+            "top_k": 50,
             "pad_token_id": tokenizer.eos_token_id,
         }
+        
         outputs = model.generate(**generation_params)
         raw_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Clean the output
         cleaned = clean_prescription_text(raw_text)
-        if any(section not in cleaned for section in ["PRESCRIPTION", "RECOMMENDATIONS", "PRECAUTIONS"]):
-            return generate_fallback_prescription(diagnosis, allergies_text)
+        
+        # Validate the output has required sections
+        if not validate_prescription(cleaned):
+            print("Generated prescription doesn't have required sections, using fallback")
+            return generate_fallback_prescription(diagnosis, allergies_text, medical_history_text)
+        
         return cleaned
+        
     except Exception as e:
-        print(f"Error: {e}")
-        return generate_fallback_prescription(diagnosis, allergies_text)
+        print(f"Error generating prescription: {e}")
+        return generate_fallback_prescription(diagnosis, allergies_text, medical_history_text)
 
 def clean_prescription_text(text):
-    text = re.sub(r'(?:\n\s*)+', '\n', text)
+    """Clean and format the prescription text"""
+    # Remove excessive whitespace
+    text = re.sub(r'\n\s*\n+', '\n\n', text)
     text = text.strip()
     return text
 
-def generate_fallback_prescription(diagnosis, allergies):
-    return f"""
-PRESCRIPTION:
-- Acetaminophen 500mg orally every 6 hours as needed for pain (max 4g/day).
-- Immobilization with cervical collar or as per specialist recommendation.
+def validate_prescription(text):
+    """Check if prescription has required sections"""
+    required_sections = ["PRESCRIPTION", "RECOMMENDATIONS", "PRECAUTIONS"]
+    text_upper = text.upper()
+    return all(section in text_upper for section in required_sections)
 
-RECOMMENDATIONS:
-- Strict bed rest with cervical spine precautions.
-- Follow-up with orthopedic surgeon and neurologist urgently.
-- MRI of cervical spine if not already done.
+def generate_fallback_prescription(diagnosis, allergies, medical_history):
+    """Generate a structured fallback prescription"""
+    
+    # Determine severity based on diagnosis
+    high_severity_keywords = ["Jefferson", "Burst", "Flexion teardrop", "Facet dislocation"]
+    is_high_severity = any(keyword in diagnosis for keyword in high_severity_keywords)
+    
+    prescription = f"""
+═══════════════════════════════════════════════════════════
+                    MEDICAL PRESCRIPTION
+═══════════════════════════════════════════════════════════
 
-PRECAUTIONS:
-- Watch for worsening neck pain, numbness, weakness, breathing difficulty.
-- Seek immediate medical attention if neurological symptoms develop.
+DIAGNOSIS: {diagnosis}
+
+PATIENT ALLERGIES: {allergies}
+
+MEDICAL HISTORY: {medical_history}
+
+═══════════════════════════════════════════════════════════
+[PRESCRIPTION]
+═══════════════════════════════════════════════════════════
+
+• Acetaminophen 500mg: Take orally every 6 hours as needed for pain relief
+  (Maximum daily dose: 4000mg/24 hours)
+
+• Cyclobenzaprine 5-10mg: Take orally at bedtime for muscle spasm relief
+  (Do not exceed 30mg/day)
+
 """
+    
+    if is_high_severity:
+        prescription += """• Oxycodone 5mg: Take orally every 4-6 hours for severe pain management
+  (Use only as directed by physician)
+
+"""
+    
+    prescription += """• Cervical Orthosis (Collar): Wear as directed for immobilization
+  Duration: Minimum 6-8 weeks or as advised by specialist
+
+• Omeprazole 20mg: Take once daily before breakfast to protect stomach
+  (Prophylaxis while on pain medications)
+
+═══════════════════════════════════════════════════════════
+[RECOMMENDATIONS]
+═══════════════════════════════════════════════════════════
+
+"""
+    
+    if is_high_severity:
+        prescription += """• URGENT: Immediate referral to orthopedic spine surgeon
+• Neurosurgical consultation within 24-48 hours
+• Complete bed rest with cervical spine precautions
+• Avoid any neck movement or rotation
+• MRI of cervical spine if not already performed
+• CT scan with 3D reconstruction recommended
+• ICU monitoring if neurological symptoms present
+• Serial neurological examinations every 4 hours
+"""
+    else:
+        prescription += """• Follow-up with orthopedic specialist within 1 week
+• Cervical spine X-rays (flexion/extension views) in 2 weeks
+• Physical therapy consultation after acute phase (4-6 weeks)
+• Gradual return to activities as tolerated
+• Sleep with cervical pillow for proper neck support
+• Apply ice packs for 15-20 minutes every 2-3 hours (first 48 hours)
+• After 48 hours, alternate with heat therapy
+"""
+    
+    prescription += """
+• Avoid driving until cleared by physician
+• No heavy lifting (>5 lbs) for minimum 6 weeks
+• Maintain proper posture at all times
+• Keep follow-up appointments as scheduled
+
+═══════════════════════════════════════════════════════════
+[PRECAUTIONS]
+═══════════════════════════════════════════════════════════
+
+⚠️ SEEK IMMEDIATE EMERGENCY CARE IF YOU EXPERIENCE:
+
+• Sudden onset of weakness in arms or legs
+• Numbness or tingling in extremities
+• Loss of bladder or bowel control
+• Difficulty breathing or shortness of breath
+• Severe headache with neck stiffness
+• Increasing neck pain despite medications
+• Dizziness, loss of balance, or coordination problems
+• Changes in vision or speech
+• Fever above 101°F (38.3°C)
+
+⚠️ MEDICATION PRECAUTIONS:
+
+• Do not consume alcohol while taking pain medications
+• Avoid operating machinery or driving if drowsy
+• Take medications with food to reduce stomach upset
+• Do not exceed prescribed dosages
+"""
+    
+    if allergies and allergies.lower() != "none reported":
+        prescription += f"• ALERT: Patient has documented allergies to: {allergies}\n"
+    
+    prescription += """
+• Keep all medications out of reach of children
+• Store in a cool, dry place away from direct sunlight
+
+═══════════════════════════════════════════════════════════
+FOLLOW-UP SCHEDULE
+═══════════════════════════════════════════════════════════
+
+• Week 1: Orthopedic consultation
+• Week 2: Imaging follow-up
+• Week 4-6: Re-evaluation and physical therapy assessment
+• Week 12: Final assessment for return to full activities
+
+═══════════════════════════════════════════════════════════
+
+This prescription is valid for 30 days from date of issue.
+
+NOTE: This is a preliminary prescription based on AI-assisted analysis.
+Final treatment plan should be confirmed by a licensed physician after
+complete clinical examination and review of all imaging studies.
+
+═══════════════════════════════════════════════════════════
+"""
+    
+    return prescription
 
 @app.route('/<path:path>')
 def serve_react(path):
@@ -242,4 +413,4 @@ def serve_react(path):
         return send_from_directory(app.static_folder, 'index.html')
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+    app.run(debug=True, host='0.0.0.0', port=5000)

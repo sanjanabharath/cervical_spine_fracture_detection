@@ -9,6 +9,7 @@ import {
   Circle,
   Info,
   Clipboard,
+  Download,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Button } from "../ui/Button";
@@ -158,6 +159,7 @@ const FileUpload: React.FC = () => {
     setIsAnalyzing(true);
     setError(null);
     setShowPrescription(false);
+    setPrescription(null);
 
     try {
       const formData = new FormData();
@@ -179,6 +181,7 @@ const FileUpload: React.FC = () => {
         setError(response.data.error || "Unknown error occurred");
       }
     } catch (err: any) {
+      console.error("Analysis error:", err);
       setError(
         err.response?.data?.error || err.message || "Failed to analyze image"
       );
@@ -199,8 +202,17 @@ const FileUpload: React.FC = () => {
     try {
       const formData = new FormData();
       formData.append("file", files[0].file);
-      formData.append("allergies", allergies);
-      formData.append("medical_history", medicalHistory);
+      formData.append("allergies", allergies || "None reported");
+      formData.append(
+        "medical_history",
+        medicalHistory || "No significant history"
+      );
+
+      console.log("Sending prescription request with:", {
+        file: files[0].file.name,
+        allergies: allergies || "None reported",
+        medical_history: medicalHistory || "No significant history",
+      });
 
       const response = await axios.post(
         "http://127.0.0.1:5000/api/analyze?include_prescription=true",
@@ -212,14 +224,22 @@ const FileUpload: React.FC = () => {
         }
       );
 
+      console.log("Prescription response:", response.data);
+
       if (response.data.status === "success") {
         setAnalysisResults(response.data.analysis_results);
-        setPrescription(response.data.analysis_results.prescription);
-        setShowPrescription(true);
+
+        if (response.data.analysis_results.prescription) {
+          setPrescription(response.data.analysis_results.prescription);
+          setShowPrescription(true);
+        } else {
+          setError("Prescription was not included in the response");
+        }
       } else {
         setError(response.data.error || "Unknown error occurred");
       }
     } catch (err: any) {
+      console.error("Prescription error:", err);
       setError(
         err.response?.data?.error ||
           err.message ||
@@ -228,6 +248,23 @@ const FileUpload: React.FC = () => {
     } finally {
       setIsPrescribing(false);
     }
+  };
+
+  // Function to download prescription
+  const downloadPrescription = () => {
+    if (!prescription) return;
+
+    const blob = new Blob([prescription], { type: "text/plain" });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `prescription_${
+      new Date().toISOString().split("T")[0]
+    }.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
   };
 
   // Transform data for charts
@@ -261,7 +298,8 @@ const FileUpload: React.FC = () => {
     <section className="w-full">
       {/* Patient Information Fields */}
       <div className="mb-6 bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-        <h3 className="text-lg font-medium text-gray-900 mb-4">
+        <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center">
+          <Info className="mr-2" size={20} />
           Patient Information
         </h3>
 
@@ -276,8 +314,8 @@ const FileUpload: React.FC = () => {
             <textarea
               id="allergies"
               rows={3}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-primary-500 focus:border-primary-500"
-              placeholder="Enter patient allergies (medications, foods, etc.)"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              placeholder="Enter patient allergies (e.g., Penicillin, Aspirin, etc.)"
               value={allergies}
               onChange={(e) => setAllergies(e.target.value)}
             />
@@ -293,7 +331,7 @@ const FileUpload: React.FC = () => {
             <textarea
               id="medicalHistory"
               rows={3}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-primary-500 focus:border-primary-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               placeholder="Enter relevant medical history (previous injuries, conditions, surgeries, etc.)"
               value={medicalHistory}
               onChange={(e) => setMedicalHistory(e.target.value)}
@@ -306,15 +344,15 @@ const FileUpload: React.FC = () => {
         {...getRootProps()}
         className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors ${
           isDragActive
-            ? "border-primary-500 bg-primary-50"
-            : "border-gray-300 hover:border-primary-400 hover:bg-gray-50"
+            ? "border-blue-500 bg-blue-50"
+            : "border-gray-300 hover:border-blue-400 hover:bg-gray-50"
         }`}
       >
         <input {...getInputProps()} />
         <div className="flex flex-col items-center justify-center space-y-4">
           <Upload
             className={`h-12 w-12 ${
-              isDragActive ? "text-primary-500" : "text-gray-400"
+              isDragActive ? "text-blue-500" : "text-gray-400"
             }`}
           />
           <div>
